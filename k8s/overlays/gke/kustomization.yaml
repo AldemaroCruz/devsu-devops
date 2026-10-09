@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: Ingress
+      name: demo-api
+    patch: |-
+      - op: remove
+        path: /spec/ingressClassName
+      - op: add
+        path: /metadata/annotations
+        value:
+          kubernetes.io/ingress.class: gce
+      - op: remove
+        path: /spec/rules/0/host
+  - target:
+      kind: Service
+      name: demo-api
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          cloud.google.com/neg: '{"ingress": true}'
+  - target:
+      kind: ConfigMap
+      name: demo-config
+    patch: |-
+      - op: replace
+        path: /data/DJANGO_ALLOWED_HOSTS
+        value: "*"

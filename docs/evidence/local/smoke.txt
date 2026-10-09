@@ -1,0 +1,4 @@
+Gunicorn + SQLite local execution: PASS
+Liveness, readiness, create, get, list, delete: PASS
+Collected DRF static CSS asset: HTTP 200
+Not a Docker or Kubernetes execution.

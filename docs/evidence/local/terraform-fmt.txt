@@ -1,0 +1,3 @@
+PASS: terraform 1.13.3 fmt -check
+Provider init: google 7.46.1 installed and locked
+Provider schema validation: BLOCKED by host Unix socket restriction

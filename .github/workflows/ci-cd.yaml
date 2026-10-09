@@ -1,0 +1,221 @@
+name: CI and Kubernetes deployment
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: devsu
+          POSTGRES_PASSWORD: ci-test-only
+          POSTGRES_DB: devsu
+        ports: [5432:5432]
+        options: >-
+          --health-cmd="pg_isready -U devsu -d devsu"
+          --health-interval=5s --health-timeout=3s --health-retries=20
+    env:
+      DJANGO_SECRET_KEY: ci-test-only-not-a-production-secret
+      DATABASE_URL: postgres://devsu:ci-test-only@localhost:5432/devsu
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check . && ruff format --check .
+      - run: bandit -r api demo -x api/tests.py,api/migrations -ll
+      - run: python manage.py check && python manage.py makemigrations --check --dry-run
+      - run: python manage.py collectstatic --noinput
+      - run: coverage run manage.py test && coverage report && coverage xml
+      - name: Dependency vulnerability gate
+        run: pip-audit -r requirements.txt --format json --output dependency-audit.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: quality-reports
+          path: |
+            coverage.xml
+            dependency-audit.json
+  infrastructure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: '1.13.3'
+      - run: terraform -chdir=infra/gcp fmt -check && terraform -chdir=infra/gcp init -backend=false && terraform -chdir=infra/gcp validate
+  build:
+    needs: [quality, infrastructure]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build once
+        run: |
+          docker build --pull -t demo-devops:${GITHUB_SHA} .
+          docker save demo-devops:${GITHUB_SHA} -o image.tar
+      - name: Scan image before publication
+        run: |
+          docker run --rm -v "$PWD:/work" aquasec/trivy:0.74.0 image \
+            --input /work/image.tar --scanners vuln \
+            --format json --output /work/trivy.json
+          docker run --rm -v "$PWD:/work" aquasec/trivy:0.74.0 image \
+            --input /work/image.tar --scanners vuln --severity HIGH,CRITICAL \
+            --ignore-unfixed --exit-code 1
+      - name: Publish commit image to GHCR
+        if: github.event_name != 'pull_request'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REMOTE="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag demo-devops:${GITHUB_SHA} "$REMOTE"
+          docker push "$REMOTE"
+          docker buildx imagetools inspect "$REMOTE" > image-publication.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: container-image
+          path: image.tar
+          retention-days: 3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: image-security-and-publication
+          path: |
+            trivy.json
+            image-publication.txt
+  deploy-kind:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: pip install PyYAML==6.0.3
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: container-image
+      - name: Create test cluster and load built image
+        run: |
+          curl -fsSLo kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+          curl -fsSLo kubectl https://dl.k8s.io/release/v1.34.0/bin/linux/amd64/kubectl
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+          kind create cluster --name devsu --image kindest/node:v1.34.0 --config k8s/kind.yaml --wait 120s
+          docker load -i image.tar
+          kind load docker-image demo-devops:${GITHUB_SHA} --name devsu
+      - name: Install ingress controller and CPU metrics
+        run: |
+          helm repo add traefik https://traefik.github.io/charts
+          helm repo update
+          helm upgrade --install traefik traefik/traefik --version 37.1.1             --namespace ingress-system --create-namespace --set service.type=ClusterIP --wait --timeout 180s
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.8.0/components.yaml
+          # Local kind only: its kubelet serving certificate is not publicly trusted.
+          kubectl -n kube-system patch deployment metrics-server --type=json             -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+          kubectl -n kube-system rollout status deployment/metrics-server --timeout=180s
+      - name: Deploy migrations then two API replicas
+        env:
+          IMAGE: demo-devops:${{ github.sha }}
+        run: python scripts/deploy.py
+      - name: Verify ingress, data persistence across API pods and HPA metrics
+        run: |
+          mkdir -p evidence
+          kubectl -n ingress-system port-forward svc/traefik 8080:80 > /tmp/ingress-forward.log 2>&1 &
+          FORWARD_PID=$!
+          trap 'kill "$FORWARD_PID" || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS -H 'Host: demo.local' http://localhost:8080/health/ready/; then break; fi
+            sleep 2
+          done
+          python scripts/smoke.py http://localhost:8080 | tee evidence/smoke.txt
+          python scripts/verify-cluster.py | tee evidence/cluster-check.txt
+          kubectl -n devsu get deploy,pods,svc,ingress,hpa,pdb,pvc -o wide > evidence/resources.txt
+          kubectl -n devsu logs job/demo-migrate > evidence/migrations.txt
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          mkdir -p evidence
+          kubectl get pods -A -o wide > evidence/pods.txt || true
+          kubectl -n devsu get events --sort-by=.lastTimestamp > evidence/events.txt || true
+          kubectl -n devsu describe pods > evidence/describe.txt || true
+          kubectl -n devsu logs job/demo-migrate > evidence/migrations.txt || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: kubernetes-evidence
+          path: evidence/
+      - name: Delete ephemeral cluster
+        if: always()
+        run: kind delete cluster --name devsu
+  deploy-gke:
+    needs: [build, deploy-kind]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.ENABLE_GKE_CD == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: gke-demo
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: pip install PyYAML==6.0.3
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: container-image
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - uses: google-github-actions/get-gke-credentials@3da1e46a907576cefaa90c484278bb5b259dd395 # v3
+        with:
+          cluster_name: ${{ vars.GKE_CLUSTER }}
+          location: ${{ vars.GCP_REGION }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+      - name: Publish same tested image and deploy by digest
+        env:
+          PROJECT: ${{ vars.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION }}
+        run: |
+          REGISTRY="${REGION}-docker.pkg.dev"
+          REMOTE="${REGISTRY}/${PROJECT}/devsu/demo:${GITHUB_SHA}"
+          gcloud auth configure-docker "$REGISTRY" --quiet
+          docker load -i image.tar
+          docker tag demo-devops:${GITHUB_SHA} "$REMOTE"
+          docker push "$REMOTE"
+          DIGEST=$(docker buildx imagetools inspect "$REMOTE" --format '{{.Manifest.Digest}}')
+          IMAGE="${REGISTRY}/${PROJECT}/devsu/demo@${DIGEST}" python scripts/deploy.py k8s/overlays/gke
+      - name: Verify GKE workload through Service
+        run: |
+          kubectl -n devsu port-forward svc/demo-api 8080:80 >/tmp/gke-forward.log 2>&1 &
+          FORWARD_PID=$!
+          trap 'kill "$FORWARD_PID" || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS -H 'Host: demo.local' http://localhost:8080/health/ready/; then break; fi
+            sleep 2
+          done
+          python scripts/smoke.py http://localhost:8080
+          kubectl -n devsu get ingress,hpa,pods -o wide

@@ -1,0 +1,4 @@
+project_id           = "YOUR-DEDICATED-GCP-PROJECT"
+region               = "us-east1"
+github_repository    = "YOUR-USER/devsu-devops"
+github_repository_id = "123456789"
