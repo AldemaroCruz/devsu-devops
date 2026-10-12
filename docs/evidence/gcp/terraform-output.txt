@@ -1,0 +1,8 @@
+github_variables = {
+  "GCP_DEPLOY_SA" = "devsu-github-deploy@boreal-complex-435622-t5.iam.gserviceaccount.com"
+  "GCP_PROJECT_ID" = "boreal-complex-435622-t5"
+  "GCP_REGION" = "us-east1"
+  "GCP_WIF_PROVIDER" = "projects/539158678722/locations/global/workloadIdentityPools/devsu-github/providers/github"
+  "GKE_CLUSTER" = "devsu-demo"
+}
+registry = "us-east1-docker.pkg.dev/boreal-complex-435622-t5/devsu/demo"

@@ -1,0 +1,1 @@
+PASS: two ready API pods, cross-pod persistence, HPA metrics available

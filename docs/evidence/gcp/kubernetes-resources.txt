@@ -1,0 +1,16 @@
+NAME                       READY   UP-TO-DATE   AVAILABLE   AGE   CONTAINERS   IMAGES                                                                                                                                SELECTOR
+deployment.apps/demo-api   2/2     2            2           39h   api          us-east1-docker.pkg.dev/boreal-complex-435622-t5/devsu/demo@sha256:7c04824052488d3ad6fd039b7c3185f411d645b176533424cedbf3ea41514428   app=demo-api
+
+NAME                           READY   STATUS    RESTARTS   AGE   IP           NODE                                  NOMINATED NODE   READINESS GATES
+pod/demo-api-9d77fdfcd-26825   1/1     Running   0          21m   10.20.0.70   gk3-devsu-demo-pool-1-db12d475-568j   <none>           1/1
+pod/demo-api-9d77fdfcd-t7sh6   1/1     Running   0          21m   10.20.0.71   gk3-devsu-demo-pool-1-db12d475-568j   <none>           1/1
+pod/postgres-0                 1/1     Running   0          39h   10.20.0.17   gk3-devsu-demo-pool-1-ebc0439c-b92r   <none>           <none>
+
+NAME                                           REFERENCE             TARGETS       MINPODS   MAXPODS   REPLICAS   AGE
+horizontalpodautoscaler.autoscaling/demo-api   Deployment/demo-api   cpu: 4%/70%   2         5         2          39h
+
+NAME                                 CLASS    HOSTS   ADDRESS         PORTS   AGE
+ingress.networking.k8s.io/demo-api   <none>   *       136.82.26.191   80      39h
+
+NAME                                    STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE   VOLUMEMODE
+persistentvolumeclaim/data-postgres-0   Bound    pvc-3b8401ac-58f8-44e3-a8e3-e66afd852831   1Gi        RWO            standard-rwo   <unset>                 39h   Filesystem
