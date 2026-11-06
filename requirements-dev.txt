@@ -1,5 +1,5 @@
 -r requirements.txt
-coverage==7.16.2
+coverage==7.17.1
 ruff==0.16.10
 bandit==1.9.4
 pip-audit==2.10.1
